@@ -7,13 +7,13 @@ use ed25519_dalek::{Keypair, PublicKey, Signature};
 use sha2::{Sha256, Digest};
 use base64::encode;
 
-pub type Result<T> = std::result::Result<T, String>;
+use crate::structs::Result;
 
-fn commit(key: &PublicKey) -> String {
+pub fn commit(key: &PublicKey) -> String {
   let mut hasher = Sha256::new();
   hasher.input(key.as_bytes());
   let result = hasher.result();
-
+  
   encode(&result)
 }
 
@@ -581,10 +581,10 @@ mod tests {
   fn insert_registry() {
     let (mut identity, _, _ , id_keypair) = create();
 
-    let reg1 = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 0);
+    let reg1 = Registry::new(&id_keypair, "idp.io/test", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 0);
     assert!(identity.save(reg1.clone()) == Ok(()));
 
-    let reg2 = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"More info!", &reg1.sig, 0);
+    let reg2 = Registry::new(&id_keypair, "idp.io/test", "test", OType::SET, b"More info!", &reg1.sig, 0);
     assert!(identity.save(reg2) == Ok(()));
   }
 
@@ -592,10 +592,10 @@ mod tests {
   fn insert_registry_invalid_chain() {
     let (mut identity, _, _ , id_keypair) = create();
 
-    let reg1 = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 0);
+    let reg1 = Registry::new(&id_keypair, "idp.io/test", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 0);
     assert!(identity.save(reg1) == Ok(()));
     
-    let reg2 = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"More info!", identity.prev().unwrap(), 0);
+    let reg2 = Registry::new(&id_keypair, "idp.io/test", "test", OType::SET, b"More info!", identity.prev().unwrap(), 0);
     assert!(identity.save(reg2) == Err("Invalid chain!".into()));
   }
 
@@ -603,7 +603,7 @@ mod tests {
   fn insert_registry_invalid_key_index() {
     let (mut identity, _, _ , id_keypair) = create();
 
-    let reg = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 1);
+    let reg = Registry::new(&id_keypair, "idp.io/test", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 1);
     assert!(identity.save(reg) == Err("Invalid key index!".into()));
   }
 }

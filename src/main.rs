@@ -1,6 +1,7 @@
-mod identity;
+mod structs;
 
-use identity::*;
+use structs::identity::*;
+use structs::anchor::*;
 
 use rand::rngs::OsRng;
 use ed25519_dalek::Keypair;
@@ -34,6 +35,12 @@ fn main() {
   println!("ID-ENABLED: {:?}", identity.is_enabled());
 
   // insert registry
-  let reg = Registry::new(&id_keypair2, "idp.io", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 1);
+  let reg = Registry::new(&id_keypair2, "idp.io/test", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 1);
   identity.save(reg).unwrap();
+
+  // insert anchor
+  let profile_keypair: Keypair = Keypair::generate(&mut csprng);
+  let anchor = Anchor::new(&profile_keypair, &identity.udi, "some", 0);
+  let anchor_reg = Registry::new(&id_keypair2, "raiap.io/test", "anchor", OType::SET, &anchor.to_bytes(), identity.prev().unwrap(), 1);
+  identity.save(anchor_reg).unwrap();
 }

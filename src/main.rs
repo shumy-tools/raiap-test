@@ -20,7 +20,7 @@ fn main() {
   println!("ID-ENABLED: {:?}", identity.is_enabled());
 
   // evolve identity with the master group
-  let cancel = Cancel::new(&m_keypair, identity.prev().unwrap());
+  let cancel = Cancel::new(false, &m_keypair, identity.prev().unwrap());
   identity.cancel(cancel).unwrap();
   println!("ID-ENABLED: {:?}", identity.is_enabled());
 

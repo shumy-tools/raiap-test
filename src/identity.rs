@@ -79,9 +79,13 @@ impl Identity {
 
     // get the corresponding card group and disable identity
     let commit = commit(&ev.key);
-    match card.groups.contains_key(&commit) {
-      false => Err("No group found to evolve!".into()),
-      true => {
+    match card.groups.get(&commit) {
+      None => Err("No group found to evolve!".into()),
+      Some(gr) => {
+        if ev.is_close && gr.typ != TLType::MASTER {
+          return Err("Only master groups can close permanently!".into())
+        }
+
         self.enabled = false;
         self.evols.push(Evolve { cancel: Some(ev), renew: None });
         Ok(())
@@ -116,6 +120,11 @@ impl Identity {
             }
 
             let cancel = current.cancel.as_ref().unwrap();
+            
+            // is it closed permanently?
+            if cancel.is_close {
+              return Err("Identity closed permanently!".into())
+            }
 
             // the last cancel must be referenced
             if cancel.sig != ev.prev {
@@ -137,7 +146,7 @@ impl Identity {
     let commit = commit(&key);
     match card.groups.get(&commit) {
       None => Err("No group found to evolve!".into()),
-      Some(gr) => {
+      Some(_) => {
         //TODO: can I evolve to a new key?
 
         self.enabled = false;
@@ -165,7 +174,7 @@ impl Identity {
       .ok_or("A renew must exist to evolve!")?;
     
     if renew.commit != commit(&card.key) {
-      return Err("The commit is not valid!".into())
+      return Err("The card key is not valid!".into())
     }
 
     if !card.verify() {
@@ -222,7 +231,7 @@ impl Card {
 //-----------------------------------------------------------------------------------------------------------
 // TLType & TLGroup
 //-----------------------------------------------------------------------------------------------------------
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 pub enum TLType { MASTER, SLAVE }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -249,27 +258,33 @@ pub struct Evolve {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Cancel {
+  pub is_close: bool,
   pub prev: Signature,
   pub sig: Signature,
   key: PublicKey
 }
 
 impl Cancel {
-  pub fn new(keypair: &Keypair, prev: &Signature) -> Self {
-    let sig_data = Self::data(prev);
+  pub fn new(is_close: bool, keypair: &Keypair, prev: &Signature) -> Self {
+    let sig_data = Self::data(is_close, prev);
     let sig = keypair.sign(&sig_data);
 
-    Self { prev: prev.clone(), sig, key: keypair.public }
+    Self { is_close, prev: prev.clone(), sig, key: keypair.public }
   }
 
   pub fn verify(&self) -> bool {
-    let sig_data = Self::data(&self.prev);
+    let sig_data = Self::data(self.is_close, &self.prev);
     self.key.verify(&sig_data, &self.sig).is_ok()
   }
 
-  fn data(prev: &Signature) -> Vec<u8> {
+  fn data(is_close: bool, prev: &Signature) -> Vec<u8> {
+    let mut data = Vec::<u8>::new();
+
     // These unwrap() should never fail, or it's a serious code bug!
-    bincode::serialize(prev).unwrap().into()
+    data.extend(bincode::serialize(&is_close).unwrap());
+    data.extend(bincode::serialize(prev).unwrap());
+    
+    data
   }
 }
 
@@ -310,5 +325,151 @@ impl Renew {
     data.extend(bincode::serialize(prev).unwrap());
     
     data
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use rand::rngs::OsRng;
+  use ed25519_dalek::Keypair;
+
+  fn create() -> (Identity, TLGroup, Keypair) {
+    let mut csprng = OsRng{};
+
+    // create master group
+    let m_keypair: Keypair = Keypair::generate(&mut csprng);
+    let master = TLGroup::new(TLType::MASTER, &m_keypair.public);
+
+    // create genesis card and identity
+    let id_keypair: Keypair = Keypair::generate(&mut csprng);
+    let genesis = Card::new(&id_keypair, b"No important info!", &vec![master.clone()]);
+    let identity = Identity::new(genesis).unwrap();
+    
+    (identity, master, m_keypair)
+  }
+
+  #[test]
+  fn create_and_evolve() {
+    let mut csprng = OsRng{};
+    let (mut identity, master, m_keypair) = create();
+    assert!(identity.is_enabled());
+
+    // cancel identity with the master group
+    let cancel = Cancel::new(false, &m_keypair, identity.prev().unwrap());
+    identity.cancel(cancel).unwrap();
+    assert!(!identity.is_enabled());
+
+    // renew identity with the master group
+    let id_keypair2: Keypair = Keypair::generate(&mut csprng);
+    let renew = Renew::new(&m_keypair, &id_keypair2.public, identity.prev().unwrap(), false);
+    identity.renew(renew).unwrap();
+    assert!(!identity.is_enabled());
+
+    // evolve identity to the new card (commited in the renew)
+    let card2 = Card::new(&id_keypair2, b"No info!", &vec![master.clone()]);
+    identity.evolve(card2).unwrap();
+    assert!(identity.is_enabled());
+  }
+
+  #[test]
+  fn direct_renew() {
+    let mut csprng = OsRng{};
+    let (mut identity, master, m_keypair) = create();
+
+    // renew performs an implicit cancel
+    let id_keypair2: Keypair = Keypair::generate(&mut csprng);
+    let renew = Renew::new(&m_keypair, &id_keypair2.public, identity.prev().unwrap(), true);
+    identity.renew(renew).unwrap();
+
+    // evolve identity to the new card (commited in the renew)
+    let card2 = Card::new(&id_keypair2, b"No info!", &vec![master.clone()]);
+    identity.evolve(card2).unwrap();
+    assert!(identity.is_enabled());
+  }
+
+  #[test]
+  fn closed_permanently() {
+    let mut csprng = OsRng{};
+    let (mut identity, _, m_keypair) = create();
+
+    // close identity permanently
+    let cancel = Cancel::new(true, &m_keypair, identity.prev().unwrap());
+    identity.cancel(cancel).unwrap();
+
+    // renew must fail
+    let id_keypair2: Keypair = Keypair::generate(&mut csprng);
+    let renew = Renew::new(&m_keypair, &id_keypair2.public, identity.prev().unwrap(), false);
+    assert!(identity.renew(renew) == Err("Identity closed permanently!".into()));
+  }
+
+  #[test]
+  fn fail_on_wrong_key() {
+    let mut csprng = OsRng{};
+    let (mut identity, master, m_keypair) = create();
+
+    // renew performs an implicit cancel
+    let id_keypair2: Keypair = Keypair::generate(&mut csprng);
+    let renew = Renew::new(&m_keypair, &id_keypair2.public, identity.prev().unwrap(), true);
+    identity.renew(renew).unwrap();
+
+    // fail when evolving the identity to a wrong card (different key from the one in renew/commit)
+    let id_keypair3: Keypair = Keypair::generate(&mut csprng);
+    let card2 = Card::new(&id_keypair3, b"No info!", &vec![master.clone()]);
+    assert!(identity.evolve(card2) == Err("The card key is not valid!".into()));
+  }
+
+  #[test]
+  fn fail_when_disabled() {
+    let mut csprng = OsRng{};
+    let (mut identity, master, m_keypair) = create();
+
+    // cancel identity with the master group
+    let cancel = Cancel::new(false, &m_keypair, identity.prev().unwrap());
+    identity.cancel(cancel).unwrap();
+
+    // fail when identity is disabled
+    let id_keypair2: Keypair = Keypair::generate(&mut csprng);
+    let card2 = Card::new(&id_keypair2, b"No info!", &vec![master.clone()]);
+    assert!(identity.evolve(card2) == Err("A renew must exist to evolve!".into()));
+  }
+
+  #[test]
+  fn invalid_chain() {
+    let mut csprng = OsRng{};
+    let (mut identity, _, m_keypair) = create();
+
+    let previous_card = identity.prev().unwrap().clone();
+
+    // cancel identity with the master group
+    let cancel = Cancel::new(false, &m_keypair, &previous_card);
+    identity.cancel(cancel).unwrap();
+
+    // fail when renewing with an invalid chain (pointing to the previous card instead of cancel)
+    let id_keypair2: Keypair = Keypair::generate(&mut csprng);
+    let renew = Renew::new(&m_keypair, &id_keypair2.public, &previous_card, false);
+    assert!(identity.renew(renew) == Err("Invalid chain!".into()));
+  }
+
+  #[test]
+  fn signature_failed() {
+    let (mut identity, _, m_keypair) = create();
+
+    // cancel identity with the master group
+    let mut cancel1 = Cancel::new(true, &m_keypair, identity.prev().unwrap());
+    let cancel2 = Cancel::new(false, &m_keypair, identity.prev().unwrap());
+    cancel1.sig = cancel2.sig;
+    assert!(identity.cancel(cancel1) == Err("Invalid cancel!".into()));
+  }
+
+  #[test]
+  fn no_group_found() {
+    let mut csprng = OsRng{};
+    let (mut identity, _, _) = create();
+
+    // cancel identity with a non existing group
+    let m_keypair: Keypair = Keypair::generate(&mut csprng);
+    let cancel = Cancel::new(false, &m_keypair, identity.prev().unwrap());
+    assert!(identity.cancel(cancel) == Err("No group found to evolve!".into()))
   }
 }

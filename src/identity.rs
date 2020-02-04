@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use serde::{Serialize, Deserialize};
 use ed25519_dalek::{Keypair, PublicKey, Signature};
@@ -25,6 +26,7 @@ pub struct Identity {
     pub cards: Vec<Card>,
     pub evols: Vec<Evolve>,
     
+    pub db: HashMap<String, Vec<Registry>>,
     enabled: bool
 }
 
@@ -34,7 +36,7 @@ impl Identity {
       return Err("Invalid genesis card!".into())
     }
 
-    Ok(Self { udi: commit(&genesis.key), cards: vec![genesis], evols: Vec::new(), enabled: true })
+    Ok(Self { udi: commit(&genesis.key), cards: vec![genesis], evols: Vec::new(), db: HashMap::new(), enabled: true })
   }
 
   pub fn is_enabled(&self) -> bool {
@@ -44,6 +46,10 @@ impl Identity {
   pub fn card(&self) -> &Card {
     // must always have a card
     self.cards.last().as_ref().unwrap()
+  }
+
+  pub fn registry(&self, id: &str) -> Option<&Vec<Registry>> {
+    self.db.get(id)
   }
 
   pub fn prev(&self) -> Result<&Signature> {
@@ -57,6 +63,53 @@ impl Identity {
         }
       }
     }
+  }
+
+  pub fn save(&mut self, registry: Registry) -> Result<()> {
+    if !self.enabled {
+      return Err("Identity is disabled!".into())
+    }
+
+    { // scope for immutable borrow
+      let card = self.card();
+      if self.cards.len() - 1 != registry.key_index {
+        return Err("Invalid key index!".into())
+      }
+
+      if !registry.verify(&card.key) {
+        return Err("Invalid registry!".into())
+      }
+    }
+
+    let chain = self.db.get_mut(&registry.id);
+    match chain {
+      None => {
+        let card = self.card();
+        if card.sig != registry.prev {
+          return Err("Invalid chain!".into())
+        }
+
+        let id = registry.id.clone();
+        let reg = vec![registry];
+        self.db.insert(id, reg);
+      },
+
+      Some(reg) => {
+        // should always exist
+        let current = reg.last().unwrap();
+        if current.sig != registry.prev {
+          return Err("Invalid chain!".into())
+        }
+
+        if registry.typ != current.typ {
+          return Err("Invalid chain (dif type)!".into())
+        }
+
+        reg.push(registry);
+      }
+    }
+
+    Ok(())
   }
 
   pub fn cancel(&mut self, ev: Cancel) -> Result<()> {
@@ -169,6 +222,10 @@ impl Identity {
       return Err("Cannot evolve an enabled identity!".into())
     }
 
+    if card.is_genesis {
+      return Err("Cannot evolve to a genesis card!".into())
+    }
+
     let renew = self.evols.last().as_ref()
       .ok_or("Identity is disabled, must have evolutions!")?.renew.as_ref()
       .ok_or("A renew must exist to evolve!")?;
@@ -193,6 +250,7 @@ impl Identity {
 //-----------------------------------------------------------------------------------------------------------
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Card {
+  pub is_genesis: bool,
   pub info: Vec<u8>,
   pub groups: BTreeMap<String, TLGroup>,
   pub sig: Signature,
@@ -200,27 +258,28 @@ pub struct Card {
 }
 
 impl Card {
-  pub fn new(keypair: &Keypair, info: &[u8], groups: &[TLGroup]) -> Self {
+  pub fn new(is_genesis: bool, keypair: &Keypair, info: &[u8], groups: &[TLGroup]) -> Self {
     let mut g_map = BTreeMap::<String, TLGroup>::new();
     for gr in groups.into_iter() {
       g_map.insert(gr.commit.clone(), gr.clone());
     }
 
-    let sig_data = Self::data(info, &g_map);
+    let sig_data = Self::data(is_genesis, info, &g_map);
     let sig = keypair.sign(&sig_data);
 
-    Self { info: info.into(), groups: g_map, sig, key: keypair.public }
+    Self { is_genesis, info: info.into(), groups: g_map, sig, key: keypair.public }
   }
 
   pub fn verify(&self) -> bool {
-    let sig_data = Self::data(&self.info, &self.groups);
+    let sig_data = Self::data(self.is_genesis, &self.info, &self.groups);
     self.key.verify(&sig_data, &self.sig).is_ok()
   }
 
-  fn data(info: &[u8], groups: &BTreeMap<String, TLGroup>) -> Vec<u8> {
+  fn data(is_genesis: bool, info: &[u8], groups: &BTreeMap<String, TLGroup>) -> Vec<u8> {
     let mut data = Vec::<u8>::new();
 
     // These unwrap() should never fail, or it's a serious code bug!
+    data.extend(bincode::serialize(&is_genesis).unwrap());
     data.extend(bincode::serialize(info).unwrap());
     data.extend(bincode::serialize(groups).unwrap());
     
@@ -328,13 +387,58 @@ impl Renew {
   }
 }
 
+//-----------------------------------------------------------------------------------------------------------
+// Registry
+//-----------------------------------------------------------------------------------------------------------
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum OType { SET, DEL }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Registry {
+  pub id: String,  // (Domain, Name)
+  pub typ: String,
+  pub oper: OType,
+
+  pub info: Vec<u8>,
+  pub prev: Signature,
+  pub sig: Signature,
+  key_index: usize
+}
+
+impl Registry {
+  pub fn new(keypair: &Keypair, id: &str, typ: &str, oper: OType, info: &[u8], prev: &Signature, key_index: usize) -> Self {
+    let sig_data = Self::data(&id, &typ, &oper, &info, prev);
+    let sig = keypair.sign(&sig_data);
+
+    Self { id: id.into(), typ: typ.into(), oper, info: info.into(),  prev: prev.clone(), sig, key_index }
+  }
+
+  pub fn verify(&self, key: &PublicKey) -> bool {
+    let sig_data = Self::data(&self.id, &self.typ, &self.oper, &self.info, &self.prev);
+    key.verify(&sig_data, &self.sig).is_ok()
+  }
+
+  fn data(id: &str, typ: &str, oper: &OType, info: &[u8], prev: &Signature) -> Vec<u8> {
+    let mut data = Vec::<u8>::new();
+
+    // These unwrap() should never fail, or it's a serious code bug!
+    data.extend(bincode::serialize(id).unwrap());
+    data.extend(bincode::serialize(typ).unwrap());
+    data.extend(bincode::serialize(oper).unwrap());
+    data.extend(bincode::serialize(info).unwrap());
+    data.extend(bincode::serialize(prev).unwrap());
+    
+    data
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
   use rand::rngs::OsRng;
   use ed25519_dalek::Keypair;
 
-  fn create() -> (Identity, TLGroup, Keypair) {
+  fn create() -> (Identity, TLGroup, Keypair, Keypair) {
     let mut csprng = OsRng{};
 
     // create master group
@@ -343,16 +447,16 @@ mod tests {
 
     // create genesis card and identity
     let id_keypair: Keypair = Keypair::generate(&mut csprng);
-    let genesis = Card::new(&id_keypair, b"No important info!", &vec![master.clone()]);
+    let genesis = Card::new(true, &id_keypair, b"No important info!", &vec![master.clone()]);
     let identity = Identity::new(genesis).unwrap();
     
-    (identity, master, m_keypair)
+    (identity, master, m_keypair, id_keypair)
   }
 
   #[test]
   fn create_and_evolve() {
     let mut csprng = OsRng{};
-    let (mut identity, master, m_keypair) = create();
+    let (mut identity, master, m_keypair, _) = create();
     assert!(identity.is_enabled());
 
     // cancel identity with the master group
@@ -367,7 +471,7 @@ mod tests {
     assert!(!identity.is_enabled());
 
     // evolve identity to the new card (commited in the renew)
-    let card2 = Card::new(&id_keypair2, b"No info!", &vec![master.clone()]);
+    let card2 = Card::new(false, &id_keypair2, b"No info!", &vec![master.clone()]);
     identity.evolve(card2).unwrap();
     assert!(identity.is_enabled());
   }
@@ -375,7 +479,7 @@ mod tests {
   #[test]
   fn direct_renew() {
     let mut csprng = OsRng{};
-    let (mut identity, master, m_keypair) = create();
+    let (mut identity, master, m_keypair, _) = create();
 
     // renew performs an implicit cancel
     let id_keypair2: Keypair = Keypair::generate(&mut csprng);
@@ -383,7 +487,7 @@ mod tests {
     identity.renew(renew).unwrap();
 
     // evolve identity to the new card (commited in the renew)
-    let card2 = Card::new(&id_keypair2, b"No info!", &vec![master.clone()]);
+    let card2 = Card::new(false, &id_keypair2, b"No info!", &vec![master.clone()]);
     identity.evolve(card2).unwrap();
     assert!(identity.is_enabled());
   }
@@ -391,7 +495,7 @@ mod tests {
   #[test]
   fn closed_permanently() {
     let mut csprng = OsRng{};
-    let (mut identity, _, m_keypair) = create();
+    let (mut identity, _, m_keypair, _) = create();
 
     // close identity permanently
     let cancel = Cancel::new(true, &m_keypair, identity.prev().unwrap());
@@ -406,7 +510,7 @@ mod tests {
   #[test]
   fn fail_on_wrong_key() {
     let mut csprng = OsRng{};
-    let (mut identity, master, m_keypair) = create();
+    let (mut identity, master, m_keypair, _) = create();
 
     // renew performs an implicit cancel
     let id_keypair2: Keypair = Keypair::generate(&mut csprng);
@@ -415,14 +519,14 @@ mod tests {
 
     // fail when evolving the identity to a wrong card (different key from the one in renew/commit)
     let id_keypair3: Keypair = Keypair::generate(&mut csprng);
-    let card2 = Card::new(&id_keypair3, b"No info!", &vec![master.clone()]);
+    let card2 = Card::new(false, &id_keypair3, b"No info!", &vec![master.clone()]);
     assert!(identity.evolve(card2) == Err("The card key is not valid!".into()));
   }
 
   #[test]
   fn fail_when_disabled() {
     let mut csprng = OsRng{};
-    let (mut identity, master, m_keypair) = create();
+    let (mut identity, master, m_keypair, _) = create();
 
     // cancel identity with the master group
     let cancel = Cancel::new(false, &m_keypair, identity.prev().unwrap());
@@ -430,14 +534,14 @@ mod tests {
 
     // fail when identity is disabled
     let id_keypair2: Keypair = Keypair::generate(&mut csprng);
-    let card2 = Card::new(&id_keypair2, b"No info!", &vec![master.clone()]);
+    let card2 = Card::new(false, &id_keypair2, b"No info!", &vec![master.clone()]);
     assert!(identity.evolve(card2) == Err("A renew must exist to evolve!".into()));
   }
 
   #[test]
   fn invalid_chain() {
     let mut csprng = OsRng{};
-    let (mut identity, _, m_keypair) = create();
+    let (mut identity, _, m_keypair, _) = create();
 
     let previous_card = identity.prev().unwrap().clone();
 
@@ -453,7 +557,7 @@ mod tests {
 
   #[test]
   fn signature_failed() {
-    let (mut identity, _, m_keypair) = create();
+    let (mut identity, _, m_keypair, _) = create();
 
     // cancel identity with the master group
     let mut cancel1 = Cancel::new(true, &m_keypair, identity.prev().unwrap());
@@ -465,11 +569,41 @@ mod tests {
   #[test]
   fn no_group_found() {
     let mut csprng = OsRng{};
-    let (mut identity, _, _) = create();
+    let (mut identity, _, _, _) = create();
 
     // cancel identity with a non existing group
     let m_keypair: Keypair = Keypair::generate(&mut csprng);
     let cancel = Cancel::new(false, &m_keypair, identity.prev().unwrap());
     assert!(identity.cancel(cancel) == Err("No group found to evolve!".into()))
+  }
+
+  #[test]
+  fn insert_registry() {
+    let (mut identity, _, _ , id_keypair) = create();
+
+    let reg1 = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 0);
+    assert!(identity.save(reg1.clone()) == Ok(()));
+
+    let reg2 = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"More info!", &reg1.sig, 0);
+    assert!(identity.save(reg2) == Ok(()));
+  }
+
+  #[test]
+  fn insert_registry_invalid_chain() {
+    let (mut identity, _, _ , id_keypair) = create();
+
+    let reg1 = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 0);
+    assert!(identity.save(reg1) == Ok(()));
+    
+    let reg2 = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"More info!", identity.prev().unwrap(), 0);
+    assert!(identity.save(reg2) == Err("Invalid chain!".into()));
+  }
+
+  #[test]
+  fn insert_registry_invalid_key_index() {
+    let (mut identity, _, _ , id_keypair) = create();
+
+    let reg = Registry::new(&id_keypair, "idp.io", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 1);
+    assert!(identity.save(reg) == Err("Invalid key index!".into()));
   }
 }

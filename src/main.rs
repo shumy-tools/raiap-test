@@ -14,7 +14,7 @@ fn main() {
 
   // create genesis card and identity
   let id_keypair: Keypair = Keypair::generate(&mut csprng);
-  let genesis = Card::new(&id_keypair, b"No important info!", &vec![master.clone()]);
+  let genesis = Card::new(true, &id_keypair, b"No important info!", &vec![master.clone()]);
   let mut identity = Identity::new(genesis).unwrap();
   println!("NEW-ID: {:?}", identity.udi);
   println!("ID-ENABLED: {:?}", identity.is_enabled());
@@ -29,7 +29,11 @@ fn main() {
   identity.renew(renew).unwrap();
   //println!("ID: {:#?}", identity.evols);
 
-  let card2 = Card::new(&id_keypair2, b"No info!", &vec![master.clone()]);
+  let card2 = Card::new(false, &id_keypair2, b"No info!", &vec![master.clone()]);
   identity.evolve(card2).unwrap();
   println!("ID-ENABLED: {:?}", identity.is_enabled());
+
+  // insert registry
+  let reg = Registry::new(&id_keypair2, "idp.io", "test", OType::SET, b"Not important!", identity.prev().unwrap(), 1);
+  identity.save(reg).unwrap();
 }

@@ -49,15 +49,15 @@ fn main() {
 
   // construct profile stream
   let genesis = Record { oper: OType::SET, info: b"Not important!".to_vec() };
-  let mut stream = Stream::new(&profile_keypair, &identity.udi, r, &vec![], genesis);
+  let mut stream = Stream::new(&profile_keypair, &identity.udi, r, &vec![], genesis, None);
 
   // add block to stream
   let record = Record { oper: OType::SET, info: b"New info!".to_vec() };
   let block = StreamBlock::new(&profile_keypair, record, &stream.sig);
   stream.save(block).unwrap();
+  stream.verify_stream(&profile_keypair.public).unwrap();
 
-  stream.verify_chain(&profile_keypair.public).unwrap();
-
+  // check if ASI is connected to the anchor AL ?
   let al_sig = anchor.al_signature(&profile_keypair, &identity.udi);
   println!("ASI: {:?}", stream.check_asi(&identity.udi, r, &profile_keypair.public, &al_sig));
 }

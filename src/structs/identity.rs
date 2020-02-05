@@ -352,7 +352,7 @@ pub struct Renew {
   pub commit: String,
   pub prev: Signature,
   pub sig: Signature,
-  key: Option<PublicKey>
+  pub key: Option<PublicKey>
 }
 
 impl Renew {

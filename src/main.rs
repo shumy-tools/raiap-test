@@ -1,7 +1,9 @@
 mod structs;
 
+use structs::*;
 use structs::identity::*;
 use structs::anchor::*;
+use structs::stream::*;
 
 use rand::rngs::OsRng;
 use ed25519_dalek::Keypair;
@@ -39,8 +41,23 @@ fn main() {
   identity.save(reg).unwrap();
 
   // insert anchor
+  let r = "some-random";
   let profile_keypair: Keypair = Keypair::generate(&mut csprng);
-  let anchor = Anchor::new(&profile_keypair, &identity.udi, "some", 0);
+  let anchor = Anchor::new(&profile_keypair, &identity.udi, r, 0);
   let anchor_reg = Registry::new(&id_keypair2, "raiap.io/test", "anchor", OType::SET, &anchor.to_bytes(), identity.prev().unwrap(), 1);
   identity.save(anchor_reg).unwrap();
+
+  // construct profile stream
+  let genesis = Record { oper: OType::SET, info: b"Not important!".to_vec() };
+  let mut stream = Stream::new(&profile_keypair, &identity.udi, r, &vec![], genesis);
+
+  // add block to stream
+  let record = Record { oper: OType::SET, info: b"New info!".to_vec() };
+  let block = StreamBlock::new(&profile_keypair, record, &stream.sig);
+  stream.save(block).unwrap();
+
+  stream.verify_chain(&profile_keypair.public).unwrap();
+
+  let al_sig = anchor.al_signature(&profile_keypair, &identity.udi);
+  println!("ASI: {:?}", stream.check_asi(&identity.udi, r, &profile_keypair.public, &al_sig));
 }

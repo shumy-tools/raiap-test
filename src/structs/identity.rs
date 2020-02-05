@@ -7,7 +7,7 @@ use ed25519_dalek::{Keypair, PublicKey, Signature};
 use sha2::{Sha256, Digest};
 use base64::encode;
 
-use crate::structs::Result;
+use crate::structs::{Result, OType};
 
 pub fn commit(key: &PublicKey) -> String {
   let mut hasher = Sha256::new();
@@ -390,9 +390,6 @@ impl Renew {
 //-----------------------------------------------------------------------------------------------------------
 // Registry
 //-----------------------------------------------------------------------------------------------------------
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum OType { SET, DEL }
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Registry {
   pub id: String,  // (Domain, Name)

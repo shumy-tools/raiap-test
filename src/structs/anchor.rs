@@ -18,15 +18,6 @@ pub fn al(sig: &Signature) -> String {
   encode(&result)
 }
 
-pub fn asi(key: &PublicKey, sig: &Signature) -> String {
-  let mut hasher = Sha256::new();
-  hasher.input(key.as_bytes());
-  hasher.input(sig.to_bytes().as_ref());
-  let result = hasher.result();
-
-  encode(&result)
-}
-
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone)]
 pub struct Anchor {
   pub r: String,
@@ -36,10 +27,15 @@ pub struct Anchor {
 
 impl Anchor {
   pub fn new(keypair: &Keypair, udi: &str, r: &str, sn: usize) -> Self {
-    let sig_data = Self::data(udi, r);
+    let sig_data = Self::al_data(udi, r);
     let sig = keypair.sign(&sig_data);
 
     Self { r: r.into(), sn, al: al(&sig) }
+  }
+
+  pub fn al_signature(&self, keypair: &Keypair, udi: &str) -> Signature {
+    let sig_data = Self::al_data(udi, &self.r);
+    keypair.sign(&sig_data)
   }
 
   pub fn to_bytes(&self) -> Vec<u8> {
@@ -50,7 +46,7 @@ impl Anchor {
     bincode::deserialize(bytes).map_err(|_|{ "Unable to deserialize anchor!".into() })
   }
 
-  fn data(udi: &str, r: &str) -> Vec<u8> {
+  fn al_data(udi: &str, r: &str) -> Vec<u8> {
     let mut data = Vec::<u8>::new();
 
     // These unwrap() should never fail, or it's a serious code bug!
@@ -64,7 +60,10 @@ impl Anchor {
 #[cfg(test)]
 mod tests {
   use super::*;
+  
+  use crate::structs::*;
   use crate::structs::identity::*;
+  
   use rand::rngs::OsRng;
   use ed25519_dalek::Keypair;
 
